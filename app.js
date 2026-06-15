@@ -1275,17 +1275,325 @@ const canvasWrapper = document.getElementById('canvas-wrapper');
 let isSliding = false;
 let skipSidePreviewRender = false;  // Flag to skip re-rendering side previews after pre-render
 
+// View-only zoom/pan for the center canvas (does not affect export)
+let viewZoom = 1;       // scale factor (1 = fit)
+let viewPanX = 0;       // translate X in px (wrapper/display space)
+let viewPanY = 0;       // translate Y in px
+const VIEW_ZOOM_MIN = 1;
+const VIEW_ZOOM_MAX = 5;
+let isPanning = false;
+let panStart = { x: 0, y: 0, panX: 0, panY: 0 };
+
 // Two-finger horizontal swipe to navigate between screenshots
 let swipeAccumulator = 0;
 const SWIPE_THRESHOLD = 50; // Minimum accumulated delta to trigger navigation
 
-// Prevent browser back/forward gesture on the entire canvas area
+// Prevent browser back/forward gesture on the entire canvas area,
+// and use vertical wheel for view-only zoom of the center canvas.
 canvasWrapper.addEventListener('wheel', (e) => {
-    // Prevent horizontal scroll from triggering browser back/forward
+    // Horizontal scroll -> let it bubble to previewStrip for swipe nav,
+    // but prevent browser back/forward gesture.
     if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
         e.preventDefault();
+        return;
     }
+
+    // Vertical wheel (or pinch, which arrives as ctrlKey + wheel) -> zoom
+    e.preventDefault();
+    const factor = Math.exp(-e.deltaY * 0.0018);
+    zoomAt(e.clientX, e.clientY, factor);
 }, { passive: false });
+
+// --- View-only zoom/pan helpers ---
+function applyViewTransform() {
+    const tf = `translate(${viewPanX}px, ${viewPanY}px) scale(${viewZoom})`;
+    canvas.style.transformOrigin = 'center center';
+    canvas.style.transform = tf;
+    canvasWrapper.classList.toggle('zoomed', viewZoom > 1);
+}
+
+function updateZoomIndicator() {
+    const ind = document.getElementById('zoom-indicator');
+    const val = document.getElementById('zoom-indicator-value');
+    if (!ind || !val) return;
+    val.textContent = Math.round(viewZoom * 100) + '%';
+}
+
+function resetViewZoom() {
+    viewZoom = 1;
+    viewPanX = 0;
+    viewPanY = 0;
+    applyViewTransform();
+    updateZoomIndicator();
+}
+
+// Zoom while keeping the point under the cursor stationary
+function zoomAt(clientX, clientY, factor) {
+    const wRect = canvasWrapper.getBoundingClientRect();
+    // Cursor relative to wrapper (= canvas display box at scale 1)
+    const mx = clientX - wRect.left;
+    const my = clientY - wRect.top;
+    // Canvas center relative to wrapper (canvas fills the wrapper)
+    const cx = wRect.width / 2;
+    const cy = wRect.height / 2;
+    // Cursor relative to canvas center
+    const vx = mx - cx;
+    const vy = my - cy;
+
+    const z0 = viewZoom;
+    let z1 = Math.max(VIEW_ZOOM_MIN, Math.min(VIEW_ZOOM_MAX, z0 * factor));
+    if (z1 === z0) return;
+    const ratio = z1 / z0;
+    viewPanX = vx * (1 - ratio) + viewPanX * ratio;
+    viewPanY = vy * (1 - ratio) + viewPanY * ratio;
+    viewZoom = z1;
+
+    // Snap back to center when returning to 1x
+    if (viewZoom <= VIEW_ZOOM_MIN) {
+        viewZoom = 1;
+        viewPanX = 0;
+        viewPanY = 0;
+    }
+    applyViewTransform();
+    updateZoomIndicator();
+}
+
+// Double-click resets zoom
+canvasWrapper.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    resetViewZoom();
+});
+
+// Click the zoom indicator pill to reset
+document.getElementById('zoom-indicator').addEventListener('click', (e) => {
+    e.stopPropagation();
+    resetViewZoom();
+});
+
+// Drag empty space to pan when zoomed in.
+// This runs alongside the element-drag handler in setupElementCanvasDrag():
+// that handler stops propagation only when an element/popout is hit, so this
+// only kicks in when the press lands on empty canvas.
+canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;          // left button only
+    if (viewZoom <= VIEW_ZOOM_MIN) return;
+    if (isSliding) return;               // don't pan mid-transition
+    e.preventDefault();
+    isPanning = true;
+    panStart = { x: e.clientX, y: e.clientY, panX: viewPanX, panY: viewPanY };
+    canvasWrapper.classList.add('panning');
+});
+
+window.addEventListener('mousemove', (e) => {
+    if (!isPanning) return;
+    e.preventDefault();
+    const dx = e.clientX - panStart.x;
+    const dy = e.clientY - panStart.y;
+    viewPanX = panStart.panX + dx;
+    viewPanY = panStart.panY + dy;
+    clampViewPan();
+    applyViewTransform();
+});
+
+window.addEventListener('mouseup', () => {
+    if (isPanning) {
+        isPanning = false;
+        canvasWrapper.classList.remove('panning');
+    }
+});
+
+// Keep the panned canvas within view bounds so it can't drift fully off-screen
+function clampViewPan() {
+    const baseW = canvas.offsetWidth || 1;
+    const baseH = canvas.offsetHeight || 1;
+    const maxX = ((viewZoom - 1) / 2) * baseW;
+    const maxY = ((viewZoom - 1) / 2) * baseH;
+    viewPanX = Math.max(-maxX, Math.min(maxX, viewPanX));
+    viewPanY = Math.max(-maxY, Math.min(maxY, viewPanY));
+}
+
+// --- Collapsible sidebars via keyboard shortcuts ---
+// Alt+B  -> toggle left sidebar   (B = "bar", left-hand key)
+// Alt+J  -> toggle right sidebar  (J = right-hand home key)
+// Alt+\  -> toggle both sidebars (focus mode)
+// These use the Alt/Option modifier only, so they don't clash with common
+// browser (Ctrl/Cmd) or OS shortcuts on either Mac or Windows.
+function toggleSidebar(side) {
+    const container = document.getElementById('app-container');
+    if (!container) return;
+    const cls = side === 'left' ? 'left-collapsed' : 'right-collapsed';
+    container.classList.toggle(cls);
+    // Refit the canvas after the layout settles
+    setTimeout(() => updateCanvas(), 220);
+}
+
+// --- Resizable, responsive, persisted sidebars ---
+const SIDEBAR_RESIZE_KEY = 'appscreen_sidebar_widths';
+const SIDEBAR_MIN = 240;   // px - never narrower than this
+const SIDEBAR_MAX = 520;   // px - never wider than this
+
+// Clamp a saved width so it stays responsive to the current viewport.
+function clampSidebarWidth(px, isRight) {
+    // Ensure the centre column always keeps a minimum share of the viewport
+    // so the canvas stays usable. Reserve room for both sidebars + min canvas.
+    const vw = window.innerWidth;
+    const otherDefault = 300;
+    const minCanvas = Math.min(520, Math.max(360, Math.floor(vw * 0.26)));
+    const budget = vw - minCanvas - otherDefault;
+    const dynamicMax = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, budget));
+    const val = typeof px === 'number' && !isNaN(px) ? px : (isRight ? 340 : 320);
+    return Math.max(SIDEBAR_MIN, Math.min(dynamicMax, val));
+}
+
+function setSidebarWidth(side, px) {
+    const container = document.getElementById('app-container');
+    if (!container) return;
+    const clamped = clampSidebarWidth(px, side === 'right');
+    container.style.setProperty(side === 'left' ? '--sw-left' : '--sw-right', clamped + 'px');
+}
+
+// Load saved widths from localStorage and apply them
+function restoreSidebarWidths() {
+    try {
+        const raw = localStorage.getItem(SIDEBAR_RESIZE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.left === 'number') setSidebarWidth('left', parsed.left);
+        if (parsed && typeof parsed.right === 'number') setSidebarWidth('right', parsed.right);
+    } catch (e) { /* ignore corrupt storage */ }
+}
+
+function saveSidebarWidths() {
+    const container = document.getElementById('app-container');
+    if (!container) return;
+    const readVar = (name, fallback) => {
+        const v = container.style.getPropertyValue(name);
+        const n = parseFloat(v);
+        return isNaN(n) ? fallback : n;
+    };
+    try {
+        localStorage.setItem(SIDEBAR_RESIZE_KEY, JSON.stringify({
+            left: readVar('--sw-left', 320),
+            right: readVar('--sw-right', 340)
+        }));
+    } catch (e) { /* storage may be unavailable */ }
+}
+
+function setupSidebarResize() {
+    const container = document.getElementById('app-container');
+    const handleLeft = document.getElementById('resize-handle-left');
+    const handleRight = document.getElementById('resize-handle-right');
+    const overlay = document.getElementById('resize-overlay');
+    if (!container || !handleLeft || !handleRight || !overlay) return;
+
+    let dragging = null; // { side, startX, startWidth }
+
+    function startDrag(side, e) {
+        e.preventDefault();
+        const isTouch = e.type === 'touchstart';
+        const clientX = isTouch ? e.touches[0].clientX : e.clientX;
+        const propName = side === 'left' ? '--sw-left' : '--sw-right';
+        const current = parseFloat(container.style.getPropertyValue(propName)) ||
+            (side === 'left' ? 320 : 340);
+        dragging = { side, startX: clientX, startWidth: current };
+        overlay.classList.add('active');
+        (side === 'left' ? handleLeft : handleRight).classList.add('active');
+        document.body.style.cursor = 'col-resize';
+    }
+
+    function onMove(e) {
+        if (!dragging) return;
+        e.preventDefault();
+        const isTouch = e.type === 'touchmove';
+        const clientX = isTouch ? e.touches[0].clientX : e.clientX;
+        const delta = clientX - dragging.startX;
+        // For the right sidebar, dragging left (negative delta) widens it.
+        const raw = dragging.side === 'left'
+            ? dragging.startWidth + delta
+            : dragging.startWidth - delta;
+        setSidebarWidth(dragging.side, raw);
+    }
+
+    function endDrag() {
+        if (!dragging) return;
+        dragging = null;
+        overlay.classList.remove('active');
+        handleLeft.classList.remove('active');
+        handleRight.classList.remove('active');
+        document.body.style.cursor = '';
+        saveSidebarWidths();
+        updateCanvas();
+    }
+
+    handleLeft.addEventListener('mousedown', (e) => startDrag('left', e));
+    handleRight.addEventListener('mousedown', (e) => startDrag('right', e));
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', endDrag);
+
+    // Touch support
+    handleLeft.addEventListener('touchstart', (e) => startDrag('left', e), { passive: false });
+    handleRight.addEventListener('touchstart', (e) => startDrag('right', e), { passive: false });
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', endDrag);
+}
+
+// Restore on load and wire up handles once the DOM is ready
+restoreSidebarWidths();
+setupSidebarResize();
+
+// Re-clamp widths on viewport resize so sidebars stay responsive
+let sidebarResponsiveTimer = null;
+window.addEventListener('resize', () => {
+    if (sidebarResponsiveTimer) clearTimeout(sidebarResponsiveTimer);
+    sidebarResponsiveTimer = setTimeout(() => {
+        const container = document.getElementById('app-container');
+        if (!container) return;
+        const readVar = (name, fb) => {
+            const v = parseFloat(container.style.getPropertyValue(name));
+            return isNaN(v) ? fb : v;
+        };
+        setSidebarWidth('left', readVar('--sw-left', 320));
+        setSidebarWidth('right', readVar('--sw-right', 340));
+    }, 150);
+});
+
+document.addEventListener('keydown', (e) => {
+    // Only Alt (no Ctrl/Cmd/Shift) to avoid hijacking other combos
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+
+    // Ignore when typing into a text field so we don't steal the keystroke
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+
+    const key = e.key.toLowerCase();
+    if (key === 'b') {
+        e.preventDefault();
+        toggleSidebar('left');
+    } else if (key === 'j') {
+        e.preventDefault();
+        toggleSidebar('right');
+    } else if (key === '\\') {
+        e.preventDefault();
+        const container = document.getElementById('app-container');
+        // Toggle "focus mode": if either sidebar is open, collapse both;
+        // otherwise expand both.
+        const anyOpen = !container.classList.contains('left-collapsed') ||
+                        !container.classList.contains('right-collapsed');
+        container.classList.toggle('left-collapsed', anyOpen);
+        container.classList.toggle('right-collapsed', anyOpen);
+        setTimeout(() => updateCanvas(), 220);
+    }
+});
+
+// Refit the preview when the window/panels change size, so landscape/wide
+// devices keep filling the available canvas-area space.
+let resizeFitTimer = null;
+window.addEventListener('resize', () => {
+    if (resizeFitTimer) clearTimeout(resizeFitTimer);
+    resizeFitTimer = setTimeout(() => {
+        if (typeof updateCanvas === 'function') updateCanvas();
+    }, 120);
+});
 
 previewStrip.addEventListener('wheel', (e) => {
     // Only handle horizontal scrolling (two-finger swipe on trackpad)
@@ -5978,6 +6286,7 @@ function applyPositionPreset(preset) {
         'centered': { scale: 70, x: 50, y: 50, rotation: 0, perspective: 0 },
         'bleed-bottom': { scale: 85, x: 50, y: 120, rotation: 0, perspective: 0 },
         'bleed-top': { scale: 85, x: 50, y: -20, rotation: 0, perspective: 0 },
+        'bleed-right': { scale: 85, x: 120, y: 60, rotation: 0, perspective: 0 },
         'float-center': { scale: 60, x: 50, y: 50, rotation: 0, perspective: 0 },
         'tilt-left': { scale: 65, x: 50, y: 60, rotation: -8, perspective: 0 },
         'tilt-right': { scale: 65, x: 50, y: 60, rotation: 8, perspective: 0 },
@@ -6799,16 +7108,46 @@ function getCanvasDimensions() {
     return deviceDimensions[state.outputDevice];
 }
 
+// Compute the preview display scale so the main canvas fills the available
+// canvas-area space. Uses the real container dimensions (rather than a fixed
+// 400x700 box) so landscape/wide devices (e.g. desktop-4k 3840x2160) no longer
+// render as a tiny strip. Falls back to 400x700 if the container can't be measured.
+//
+// The main canvas always takes the full available space. When multiple
+// screenshots exist, the side previews are allowed to overflow horizontally
+// (the user can scroll/swipe to reach them), so they never shrink the main canvas.
+function getPreviewScale(dims) {
+    dims = dims || getCanvasDimensions();
+    const area = document.querySelector('.canvas-area');
+    // Fallback box (used before layout or if container is hidden)
+    const maxW = 400, maxH = 700;
+    if (!area) {
+        return Math.min(maxW / dims.width, maxH / dims.height);
+    }
+
+    const rect = area.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+        return Math.min(maxW / dims.width, maxH / dims.height);
+    }
+
+    const pad = 40; // .canvas-area padding per side (CSS)
+
+    // Fit the single main canvas to the available space. Side previews overflow
+    // horizontally rather than constraining the main canvas size.
+    let availW = Math.max(maxW, rect.width - 2 * pad);
+    let availH = Math.max(maxH, rect.height - 2 * pad);
+
+    return Math.min(availW / dims.width, availH / dims.height);
+}
+
 function updateCanvas() {
     saveState(); // Persist state on every update
     const dims = getCanvasDimensions();
     canvas.width = dims.width;
     canvas.height = dims.height;
 
-    // Scale for preview
-    const maxPreviewWidth = 400;
-    const maxPreviewHeight = 700;
-    const scale = Math.min(maxPreviewWidth / dims.width, maxPreviewHeight / dims.height);
+    // Scale for preview (fits available space; large for landscape devices)
+    const scale = getPreviewScale(dims);
     canvas.style.width = (dims.width * scale) + 'px';
     canvas.style.height = (dims.height * scale) + 'px';
 
@@ -6860,9 +7199,7 @@ function updateCanvas() {
 function updateSidePreviews() {
     const dims = getCanvasDimensions();
     // Same scale as main preview
-    const maxPreviewWidth = 400;
-    const maxPreviewHeight = 700;
-    const previewScale = Math.min(maxPreviewWidth / dims.width, maxPreviewHeight / dims.height);
+    const previewScale = getPreviewScale(dims);
 
     // Initialize Three.js if any screenshot uses 3D mode (needed for side previews)
     const any3D = state.screenshots.some(s => s.screenshot?.use3D);
@@ -6950,9 +7287,7 @@ function slideToScreenshot(newIndex, direction) {
     previewStrip.classList.add('sliding');
 
     const dims = getCanvasDimensions();
-    const maxPreviewWidth = 400;
-    const maxPreviewHeight = 700;
-    const previewScale = Math.min(maxPreviewWidth / dims.width, maxPreviewHeight / dims.height);
+    const previewScale = getPreviewScale(dims);
     const slideDistance = dims.width * previewScale + 10; // canvas width + gap
 
     const newPrevIndex = newIndex - 1;

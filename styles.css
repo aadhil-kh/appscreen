@@ -129,9 +129,90 @@ html.tauri-app .right-sidebar {
 
 .app-container {
     display: grid;
-    grid-template-columns: 320px 1fr 340px;
+    /* Sidebar widths are CSS vars so they can be resized & persisted via JS.
+       Defaults use clamp() so they shrink gracefully on narrow screens. */
+    grid-template-columns: var(--sw-left, clamp(240px, 22vw, 360px)) 1fr var(--sw-right, clamp(260px, 23vw, 380px));
     min-height: 100vh;
     max-height: 100vh;
+    position: relative;
+}
+
+/* Collapsible sidebars (toggled via Alt+B / Alt+J / Alt+\) */
+.sidebar-left,
+.sidebar-right {
+    overflow: hidden;
+    transition: opacity 0.2s ease;
+    min-width: 0;
+}
+
+.app-container.left-collapsed {
+    grid-template-columns: 0 1fr var(--sw-right, clamp(260px, 23vw, 380px));
+}
+
+.app-container.right-collapsed {
+    grid-template-columns: var(--sw-left, clamp(240px, 22vw, 360px)) 1fr 0;
+}
+
+.app-container.left-collapsed.right-collapsed {
+    grid-template-columns: 0 1fr 0;
+}
+
+.app-container.left-collapsed .sidebar-left,
+.app-container.right-collapsed .sidebar-right {
+    opacity: 0;
+    pointer-events: none;
+    border: none;
+}
+
+/* --- Resizable sidebar handles --- */
+.resize-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 7px;
+    cursor: col-resize;
+    z-index: 50;
+    background: transparent;
+    transition: background 0.15s ease;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+}
+
+.resize-handle.left {
+    /* Sit on the right edge of the left sidebar */
+    left: var(--sw-left, clamp(240px, 22vw, 360px));
+    margin-left: -4px;
+}
+
+.resize-handle.right {
+    /* Sit on the left edge of the right sidebar */
+    right: var(--sw-right, clamp(260px, 23vw, 380px));
+    margin-right: -4px;
+}
+
+.resize-handle:hover,
+.resize-handle.active {
+    background: var(--accent-color, #3b82f6);
+}
+
+/* Hide handles when the corresponding sidebar is collapsed */
+.app-container.left-collapsed .resize-handle.left,
+.app-container.right-collapsed .resize-handle.right {
+    display: none;
+}
+
+/* Full-screen drag overlay shown while resizing */
+.resize-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    cursor: col-resize;
+    display: none;
+}
+
+.resize-overlay.active {
+    display: block;
 }
 
 /* Sidebar styles */
@@ -146,6 +227,7 @@ html.tauri-app .right-sidebar {
 .sidebar-content {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 20px;
     padding-bottom: 0;
 }
@@ -953,6 +1035,52 @@ input[type="range"]::-webkit-slider-thumb {
 
 #preview-canvas {
     display: block;
+}
+
+#preview-canvas,
+.canvas-wrapper.zoomed #preview-canvas {
+    transform-origin: center center;
+    will-change: transform;
+}
+
+.canvas-wrapper.zoomed {
+    cursor: grab;
+}
+
+.canvas-wrapper.panning {
+    cursor: grabbing;
+}
+
+/* Only the canvas itself pans/zooms; overlays stay put */
+.zoom-indicator {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 5;
+    display: none;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    transition: background 0.15s;
+}
+
+.zoom-indicator:hover {
+    background: rgba(0, 0, 0, 0.75);
+}
+
+.canvas-wrapper.zoomed .zoom-indicator {
+    display: flex;
 }
 
 #preview-canvas-left,
