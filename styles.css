@@ -117,6 +117,11 @@ html.tauri-app body {
 html.tauri-app .app-container {
     min-height: calc(100vh - var(--tauri-titlebar-height));
     max-height: calc(100vh - var(--tauri-titlebar-height));
+    grid-template-rows: calc(100vh - var(--tauri-titlebar-height));
+}
+
+html.tauri-app .canvas-area {
+    height: calc(100vh - var(--tauri-titlebar-height));
 }
 
 html.tauri-app .sidebar {
@@ -132,6 +137,10 @@ html.tauri-app .right-sidebar {
     /* Sidebar widths are CSS vars so they can be resized & persisted via JS.
        Defaults use clamp() so they shrink gracefully on narrow screens. */
     grid-template-columns: var(--sw-left, clamp(240px, 22vw, 360px)) 1fr var(--sw-right, clamp(260px, 23vw, 380px));
+    /* Constrain to exactly one viewport row so the centre column can't grow
+       taller than the viewport (which would create a feedback loop where a
+       tall canvas expands the grid row, making the canvas even taller). */
+    grid-template-rows: 100vh;
     min-height: 100vh;
     max-height: 100vh;
     position: relative;
@@ -965,6 +974,10 @@ input[type="range"]::-webkit-slider-thumb {
     background: var(--bg-primary);
     overflow: hidden;
     position: relative;
+    /* min-height:0 breaks the CSS-grid feedback loop where the canvas content
+       would otherwise expand this cell (and thus the grid row) indefinitely. */
+    min-height: 0;
+    height: 100vh;
 }
 
 .preview-strip {
