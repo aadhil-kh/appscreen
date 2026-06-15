@@ -1,9 +1,11 @@
+Fork of **[Yuzu-hub appscreen](https://yuzu-hub.github.io/appscreen/)**. Adds support for desktop screenshots.
+
+**[Start using it now. Hosted on Cloudflare Pages](https://appscreen.pages.dev/)**
+
+
 # App Store Screenshot Generator
 
 A free, open-source tool for creating beautiful App Store screenshots with customizable backgrounds, text overlays, and 3D device mockups.
-
-
-**[Start using it now. Hosted on GitHub Pages](https://yuzu-hub.github.io/appscreen/)**
 
 ![App Store Screenshot Generator](img/screenshot-generator.png)
 
