@@ -1246,6 +1246,8 @@ const deviceDimensions = {
     'android-phone-hd': { width: 1440, height: 2560 },
     'android-tablet-7': { width: 1200, height: 1920 },
     'android-tablet-10': { width: 1600, height: 2560 },
+    'desktop-2k': { width: 2560, height: 1440 },
+    'desktop-4k': { width: 3840, height: 2160 },
     'web-og': { width: 1200, height: 630 },
     'web-twitter': { width: 1200, height: 675 },
     'web-hero': { width: 1920, height: 1080 },
