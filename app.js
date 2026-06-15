@@ -364,7 +364,8 @@ function addTextElement() {
         italic: false,
         frame: 'none',
         frameColor: '#ffffff',
-        frameScale: 100
+        frameScale: 100,
+        align: 'center'
     };
     screenshot.elements.push(el);
     selectedElementId = el.id;
@@ -2765,6 +2766,10 @@ function updateElementProperties() {
         document.getElementById('element-font-color').value = el.fontColor;
         document.getElementById('element-font-weight').value = el.fontWeight;
         document.getElementById('element-italic-btn').classList.toggle('active', el.italic);
+        const align = el.align || 'center';
+        document.getElementById('element-align-left').classList.toggle('active', align === 'left');
+        document.getElementById('element-align-center').classList.toggle('active', align === 'center');
+        document.getElementById('element-align-right').classList.toggle('active', align === 'right');
         document.getElementById('element-frame').value = el.frame || 'none';
         const frameOpts = document.getElementById('element-frame-options');
         frameOpts.style.display = el.frame && el.frame !== 'none' ? '' : 'none';
@@ -3011,6 +3016,18 @@ function setupElementEventListeners() {
             }
         });
     }
+
+    // Alignment buttons
+    ['left', 'center', 'right'].forEach((al) => {
+        const btn = document.getElementById(`element-align-${al}`);
+        if (btn) {
+            btn.addEventListener('click', () => {
+                if (!selectedElementId) return;
+                setElementProperty(selectedElementId, 'align', al);
+                updateElementProperties();
+            });
+        }
+    });
 
     // Frame dropdown
     const frameSelect = document.getElementById('element-frame');
@@ -7810,8 +7827,9 @@ function drawElementsToContext(context, dims, elements, layer) {
             const fontStyle = el.italic ? 'italic' : 'normal';
             context.font = `${fontStyle} ${el.fontWeight} ${el.fontSize}px ${el.font}`;
             context.fillStyle = el.fontColor;
-            context.textAlign = 'center';
             context.textBaseline = 'middle';
+
+            const align = el.align || 'center';
 
             // Word-wrap text within element width (respects manual line breaks)
             const lines = wrapText(context, elText, elWidth);
@@ -7820,13 +7838,26 @@ function drawElementsToContext(context, dims, elements, layer) {
 
             // Draw frame behind text if enabled
             if (el.frame && el.frame !== 'none') {
-                drawElementFrame(context, el, dims, elWidth, totalHeight);
+                drawElementFrame(context, el, dims, elWidth, totalHeight, align);
+            }
+
+            // Align text within the element container
+            let textX = 0;
+            if (align === 'left') {
+                context.textAlign = 'left';
+                textX = -elWidth / 2;
+            } else if (align === 'right') {
+                context.textAlign = 'right';
+                textX = elWidth / 2;
+            } else {
+                context.textAlign = 'center';
+                textX = 0;
             }
 
             // Draw text lines
             const startY = -(totalHeight / 2) + el.fontSize / 2;
             lines.forEach((line, i) => {
-                context.fillText(line, 0, startY + i * lineHeight);
+                context.fillText(line, textX, startY + i * lineHeight);
             });
         }
 
@@ -7922,7 +7953,7 @@ function drawPopoutsToContext(context, dims, popouts, img, screenshotSettings) {
 }
 
 // Draw decorative frames around text elements
-function drawElementFrame(context, el, dims, textWidth, textHeight) {
+function drawElementFrame(context, el, dims, textWidth, textHeight, align) {
     const scale = el.frameScale / 100;
     const padding = el.fontSize * 0.4 * scale;
     // Measure the widest line (using wrapText to match rendering)
@@ -7932,7 +7963,17 @@ function drawElementFrame(context, el, dims, textWidth, textHeight) {
     const frameW = maxLineW + padding * 2;
     const frameH = textHeight + padding * 2;
 
+    // Offset frame so it stays aligned with the (possibly left/right) text block
+    const alignment = align || 'center';
+    let offsetX = 0;
+    if (alignment === 'left') {
+        offsetX = -elWidth / 2 + frameW / 2;
+    } else if (alignment === 'right') {
+        offsetX = elWidth / 2 - frameW / 2;
+    }
+
     context.save();
+    context.translate(offsetX, 0);
     context.strokeStyle = el.frameColor;
     context.fillStyle = 'none';
     context.lineWidth = Math.max(2, el.fontSize * 0.04) * scale;

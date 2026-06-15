@@ -881,6 +881,41 @@ input[type="range"]::-webkit-slider-thumb {
     height: 14px;
 }
 
+/* Alignment button group for text elements */
+.align-btn-group {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+    background: var(--bg-tertiary);
+    padding: 4px;
+    border-radius: 8px;
+}
+
+.align-btn-group button {
+    flex: 1;
+    height: 32px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+}
+
+.align-btn-group button:hover {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+
+.align-btn-group button.active {
+    background: var(--accent);
+    color: white;
+}
+
 /* Legacy text-style-group - keeping for backwards compatibility */
 .text-style-group {
     display: flex;
