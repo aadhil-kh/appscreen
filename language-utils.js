@@ -184,8 +184,9 @@ function migrateScreenshotToLocalized(screenshot, detectedLang = 'en') {
  * @param {Image} image - The Image object
  * @param {string} src - Data URL of the image
  * @param {string} name - Filename
+ * @param {string} assetPath - Path inside the selected project folder
  */
-function addLocalizedImage(screenshotIndex, lang, image, src, name) {
+function addLocalizedImage(screenshotIndex, lang, image, src, name, assetPath = null) {
     const screenshot = state.screenshots[screenshotIndex];
     if (!screenshot) return;
 
@@ -196,7 +197,8 @@ function addLocalizedImage(screenshotIndex, lang, image, src, name) {
     screenshot.localizedImages[lang] = {
         image: image,
         src: src,
-        name: name
+        name: name,
+        assetPath: assetPath
     };
 
     // Auto-add language to project if not already present
@@ -359,7 +361,7 @@ function uploadScreenshotForLanguage(lang) {
  * Handle file selection for translation upload
  * @param {Event} event - The change event from file input
  */
-function handleTranslationFileSelect(event) {
+async function handleTranslationFileSelect(event) {
     const input = event.target;
     const lang = input.dataset.targetLang;
     const file = input.files?.[0];
@@ -374,16 +376,21 @@ function handleTranslationFileSelect(event) {
         return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        const img = new Image();
-        img.onload = () => {
-            addLocalizedImage(currentTranslationsIndex, lang, img, e.target.result, file.name);
+    if (typeof ensureActiveProjectFolder === 'function' && !await ensureActiveProjectFolder()) {
+        input.value = '';
+        return;
+    }
+
+    const src = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = async () => {
+            const assetPath = typeof saveFileAsset === 'function'
+                ? await saveFileAsset(file, 'screenshots', 'screenshot')
+                : null;
+            addLocalizedImage(currentTranslationsIndex, lang, img, src, file.name, assetPath);
             updateScreenshotTranslationsList();
-        };
-        img.src = e.target.result;
     };
-    reader.readAsDataURL(file);
+    img.src = src;
 
     input.value = '';
 }
