@@ -1334,12 +1334,204 @@ function supportsProjectFolders() {
     return typeof window.showDirectoryPicker === 'function';
 }
 
+// ===== Persisted project registry (IndexedDB) =====
+// FileSystemDirectoryHandle objects are structured-cloneable, so we store them
+// in IndexedDB. On a later session we still have the project name + handle and
+// only need to re-request folder permission (with a user gesture) instead of
+// making the user re-pick the folder every refresh.
+const PROJECTS_DB_NAME = 'appscreen-projects';
+const PROJECTS_STORE = 'projects';
+const LAST_PROJECT_KEY = 'lastActiveProjectId';
+
+function openProjectsDB() {
+    return new Promise((resolve, reject) => {
+        if (!('indexedDB' in window)) {
+            reject(new Error('IndexedDB unavailable'));
+            return;
+        }
+        const req = indexedDB.open(PROJECTS_DB_NAME, 1);
+        req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(PROJECTS_STORE)) {
+                db.createObjectStore(PROJECTS_STORE, { keyPath: 'id' });
+            }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+async function idbGetAllProjects() {
+    try {
+        const db = await openProjectsDB();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(PROJECTS_STORE, 'readonly');
+            const req = tx.objectStore(PROJECTS_STORE).getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
+    } catch (e) {
+        console.warn('Could not read saved projects:', e);
+        return [];
+    }
+}
+
+async function idbPutProject(record) {
+    try {
+        const db = await openProjectsDB();
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction(PROJECTS_STORE, 'readwrite');
+            tx.objectStore(PROJECTS_STORE).put(record);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } catch (e) {
+        console.warn('Could not save project:', e);
+    }
+}
+
+async function idbDeleteProject(id) {
+    try {
+        const db = await openProjectsDB();
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction(PROJECTS_STORE, 'readwrite');
+            tx.objectStore(PROJECTS_STORE).delete(id);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } catch (e) {
+        console.warn('Could not delete project:', e);
+    }
+}
+
+// Mirror the in-memory folder-backed projects into IndexedDB and remember which
+// one is active so it can be restored next session.
+async function persistProjectsToIDB() {
+    const folderProjects = projects.filter(p => p.handle && p.id !== 'unsaved');
+    const existing = await idbGetAllProjects();
+    const liveIds = new Set(folderProjects.map(p => p.id));
+    // Drop saved records for projects the user removed.
+    for (const rec of existing) {
+        if (!liveIds.has(rec.id)) await idbDeleteProject(rec.id);
+    }
+    for (const p of folderProjects) {
+        await idbPutProject({ id: p.id, name: p.name, handle: p.handle, lastOpened: Date.now() });
+    }
+    if (currentProjectHandle && currentProjectId !== 'unsaved') {
+        localStorage.setItem(LAST_PROJECT_KEY, currentProjectId);
+    }
+}
+
+// Silent (no-gesture) permission check for a stored handle.
+async function queryProjectPermission(handle, mode = 'readwrite') {
+    if (!handle || typeof handle.queryPermission !== 'function') return 'granted';
+    try {
+        return await handle.queryPermission({ mode });
+    } catch (e) {
+        return 'prompt';
+    }
+}
+
 function saveProjectsMeta() {
+    // Fire-and-forget; selector is updated synchronously for responsiveness.
+    persistProjectsToIDB();
     updateProjectSelector();
 }
 
 async function loadProjectsMeta() {
+    const saved = await idbGetAllProjects();
+    if (saved.length) {
+        projects = saved
+            .sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0))
+            .map(r => ({
+                id: r.id,
+                name: r.name,
+                screenshotCount: 0,
+                handle: r.handle,
+                permissionGranted: false
+            }));
+    }
     updateProjectSelector();
+}
+
+// On startup, reopen the last active project. If folder permission is still
+// granted we load immediately; otherwise we keep the name visible and prompt
+// the user to re-grant access (which requires a user gesture).
+async function restoreLastProject() {
+    const lastId = localStorage.getItem(LAST_PROJECT_KEY);
+    const target = projects.find(p => p.id === lastId && p.handle)
+        || projects.find(p => p.handle);
+
+    if (!target) {
+        await loadState();
+        return;
+    }
+
+    currentProjectId = target.id;
+
+    if (await queryProjectPermission(target.handle) === 'granted') {
+        currentProjectHandle = target.handle;
+        target.permissionGranted = true;
+        await loadState();
+        updateProjectSelector();
+    } else {
+        // Show the project name now (empty canvas) and ask to re-grant.
+        currentProjectHandle = null;
+        updateProjectSelector();
+        await loadState();
+        promptReopenProject(target);
+    }
+}
+
+// Modal asking the user to re-grant folder access for a remembered project.
+// requestPermission must be the first await inside the click handler so the
+// user gesture (transient activation) is still valid.
+function promptReopenProject(project) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay visible';
+    overlay.innerHTML = `
+        <div class="modal">
+            <div class="modal-icon" style="background: rgba(10, 132, 255, 0.2);">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--accent);">
+                    <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
+                </svg>
+            </div>
+            <h3 class="modal-title">Reopen project</h3>
+            <p class="modal-message" style="margin: 8px 0 0;">Grant access to the folder for "<strong>${project.name}</strong>" to continue where you left off.</p>
+            <div class="modal-buttons" style="margin-top: 16px;">
+                <button class="modal-btn modal-btn-cancel" id="reopen-later">Not now</button>
+                <button class="modal-btn modal-btn-confirm" id="reopen-grant" style="background: var(--accent);">Grant Access</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('#reopen-later').addEventListener('click', () => overlay.remove());
+
+    overlay.querySelector('#reopen-grant').addEventListener('click', async () => {
+        let granted = false;
+        try {
+            granted = (await project.handle.requestPermission({ mode: 'readwrite' })) === 'granted';
+        } catch (e) {
+            console.error('Permission request failed:', e);
+        }
+        if (!granted) {
+            overlay.remove();
+            await showAppAlert('Could not get access to that folder. You can reopen it with "Open Project Folder".', 'error');
+            return;
+        }
+        overlay.remove();
+        currentProjectId = project.id;
+        currentProjectHandle = project.handle;
+        project.permissionGranted = true;
+        resetStateToDefaults();
+        await loadState();
+        syncUIWithState();
+        updateScreenshotList();
+        updateGradientStopsUI();
+        updateProjectSelector();
+        updateCanvas();
+        localStorage.setItem(LAST_PROJECT_KEY, project.id);
+    });
 }
 
 async function ensureProjectPermission(handle, mode = 'readwrite') {
@@ -1527,7 +1719,7 @@ async function cloneCurrentProject() {
     currentProjectId = id;
     currentProjectHandle = target;
     projects = projects.filter(p => p.id !== 'unsaved');
-    projects.push({ id, name: copyName, screenshotCount: state.screenshots.length, handle: target });
+    projects.push({ id, name: copyName, screenshotCount: state.screenshots.length, handle: target, permissionGranted: true });
 
     await loadState();
     // Persist the clone's new name into its project.json.
@@ -1536,6 +1728,7 @@ async function cloneCurrentProject() {
     } catch (e) {
         console.error('Could not finalize clone name:', e);
     }
+    saveProjectsMeta();
     updateProjectSelector();
     await showAppAlert(`Cloned project to "${copyName}".`, 'success');
 }
@@ -1591,7 +1784,7 @@ function updateProjectSelector() {
 async function init() {
     try {
         await loadProjectsMeta();
-        await loadState();
+        await restoreLastProject();
         syncUIWithState();
         updateCanvas();
     } catch (e) {
@@ -2074,10 +2267,19 @@ async function switchProject(projectId) {
     const project = projects.find(p => p.id === projectId);
     if (!project) return;
 
+    // Re-grant folder permission if it lapsed (this click is the user gesture).
+    if (project.handle && !(await ensureProjectPermission(project.handle))) {
+        await showAppAlert('Permission to access that project folder was denied.', 'info');
+        return;
+    }
+
     currentProjectId = projectId;
     currentProjectHandle = project.handle || null;
+    project.permissionGranted = !!project.handle;
     resetStateToDefaults();
     await loadState();
+
+    if (currentProjectHandle) localStorage.setItem(LAST_PROJECT_KEY, projectId);
 
     syncUIWithState();
     updateScreenshotList();
@@ -3956,8 +4158,9 @@ function setupEventListeners() {
         }
 
         projects = projects.filter(p => p.id !== 'unsaved');
-        projects.push({ id, name, screenshotCount: 0, handle });
+        projects.push({ id, name, screenshotCount: 0, handle, permissionGranted: true });
         await loadState();
+        saveProjectsMeta();
         updateProjectSelector();
     });
 
