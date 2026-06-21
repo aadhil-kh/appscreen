@@ -2638,6 +2638,31 @@ input[type="range"]::-webkit-slider-thumb {
     margin-bottom: 0;
 }
 
+.sidebar-header-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.project-clone-btn {
+    width: 26px;
+    height: 26px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+}
+
+.project-clone-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
 .settings-btn {
     width: 32px;
     height: 32px;

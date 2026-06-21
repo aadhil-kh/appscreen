@@ -1457,6 +1457,89 @@ async function promptForProjectFolder() {
     }
 }
 
+// Recursively copy every file and subdirectory from one directory handle to another.
+async function copyDirectoryContents(source, target) {
+    for await (const entry of source.values()) {
+        if (entry.kind === 'file') {
+            const file = await entry.getFile();
+            const destFile = await target.getFileHandle(entry.name, { create: true });
+            const writable = await destFile.createWritable();
+            await writable.write(file);
+            await writable.close();
+        } else if (entry.kind === 'directory') {
+            const destDir = await target.getDirectoryHandle(entry.name, { create: true });
+            await copyDirectoryContents(entry, destDir);
+        }
+    }
+}
+
+// Clone the current project folder into a parent folder the user picks. A new
+// "<original>_copyN" folder is created inside the parent, the whole project is
+// copied into it, and the app switches to working in the clone.
+async function cloneCurrentProject() {
+    if (!currentProjectHandle) return;
+
+    // Flush the latest in-memory state so the clone is up to date.
+    try {
+        await writeProjectFile();
+    } catch (e) {
+        console.error('Could not save before cloning:', e);
+    }
+
+    const parent = await promptForProjectFolder();
+    if (!parent) return;
+
+    const originalName = currentProjectHandle.name || 'project';
+
+    // Find a free "<original>_copyN" name inside the chosen parent folder.
+    let target = null;
+    let copyName = '';
+    for (let n = 1; n <= 999; n++) {
+        copyName = `${originalName}_copy${n}`;
+        let exists = false;
+        try {
+            await parent.getDirectoryHandle(copyName);
+            exists = true;
+        } catch (e) {
+            exists = false;
+        }
+        if (!exists) {
+            target = await parent.getDirectoryHandle(copyName, { create: true });
+            break;
+        }
+    }
+
+    if (!target) {
+        await showAppAlert('Could not create a copy folder in the selected location.', 'error');
+        return;
+    }
+
+    try {
+        await copyDirectoryContents(currentProjectHandle, target);
+    } catch (e) {
+        console.error('Clone failed:', e);
+        await showAppAlert('Clone failed: ' + e.message, 'error');
+        return;
+    }
+
+    // Switch the active project to the freshly created clone.
+    const id = 'project_' + Date.now();
+    currentProjectId = id;
+    currentProjectHandle = target;
+    projects = projects.filter(p => p.id !== 'unsaved');
+    projects.push({ id, name: copyName, screenshotCount: state.screenshots.length, handle: target });
+
+    await loadState();
+    // Persist the clone's new name into its project.json.
+    try {
+        await writeProjectFile();
+    } catch (e) {
+        console.error('Could not finalize clone name:', e);
+    }
+    updateProjectSelector();
+    await showAppAlert(`Cloned project to "${copyName}".`, 'success');
+}
+
 async function ensureActiveProjectFolder() {
     if (currentProjectHandle) return true;
     await showAppAlert('Create or open a project folder before adding assets. The app will store project.json and image files in that folder.', 'info');
@@ -1473,6 +1556,9 @@ function updateProjectSelector() {
 
     // Update trigger display - always use actual state for current project
     document.getElementById('project-trigger-name').textContent = currentProject.name;
+    // Clone is only available when a real project folder is open.
+    const cloneBtn = document.getElementById('clone-project-btn');
+    if (cloneBtn) cloneBtn.style.display = currentProjectHandle ? 'flex' : 'none';
     const count = state.screenshots.length;
     document.getElementById('project-trigger-meta').textContent = `${count} screenshot${count !== 1 ? 's' : ''}`;
 
@@ -3845,6 +3931,11 @@ function setupEventListeners() {
         }
     });
 
+    // Clone current project folder into a user-chosen parent folder
+    document.getElementById('clone-project-btn').addEventListener('click', async () => {
+        await cloneCurrentProject();
+    });
+
     // Open project folder
     document.getElementById('import-project-btn').addEventListener('click', async () => {
         const handle = await promptForProjectFolder();
@@ -3932,10 +4023,15 @@ function setupEventListeners() {
         translateAllText();
     });
 
-    // Magical Titles button (in header)
-    document.getElementById('magical-titles-btn').addEventListener('click', () => {
-        dismissMagicalTitlesTooltip();
-        showMagicalTitlesDialog();
+    // Export / Import text (literals) for external translation
+    document.getElementById('export-text-btn').addEventListener('click', exportProjectText);
+    document.getElementById('import-text-btn').addEventListener('click', () => {
+        document.getElementById('import-text-input').click();
+    });
+    document.getElementById('import-text-input').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        e.target.value = '';
+        if (file) await importProjectText(file);
     });
 
     // Magical Titles modal events
@@ -4024,10 +4120,6 @@ function setupEventListeners() {
     });
 
     // About modal
-    document.getElementById('about-btn').addEventListener('click', () => {
-        document.getElementById('about-modal').classList.add('visible');
-    });
-
     document.getElementById('about-modal-close').addEventListener('click', () => {
         document.getElementById('about-modal').classList.remove('visible');
     });
@@ -5290,6 +5382,152 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
 }
 
 // Helper function to show styled alert modal
+// ===== Text literal export / import (for external translation) =====
+
+// Collect references to every editable text literal in the project:
+// headlines, subheadlines, and text-element strings across all screenshots.
+// Each ref exposes get()/set() so export and import stay symmetric.
+function collectTextLiteralRefs() {
+    const refs = [];
+    const lang = state.currentLanguage || 'en';
+    state.screenshots.forEach(s => {
+        if (s.text) {
+            const hLang = s.text.currentHeadlineLang || 'en';
+            if (!s.text.headlines) s.text.headlines = { en: '' };
+            refs.push({
+                get: () => s.text.headlines[hLang] || '',
+                set: v => { s.text.headlines[hLang] = v; }
+            });
+            const subLang = s.text.currentSubheadlineLang || 'en';
+            if (!s.text.subheadlines) s.text.subheadlines = { en: '' };
+            refs.push({
+                get: () => s.text.subheadlines[subLang] || '',
+                set: v => { s.text.subheadlines[subLang] = v; }
+            });
+        }
+        (s.elements || []).forEach(el => {
+            if (el.type !== 'text') return;
+            refs.push({
+                get: () => getElementText(el),
+                set: v => {
+                    if (!el.texts) el.texts = {};
+                    el.texts[lang] = v;
+                    el.text = v;
+                }
+            });
+        });
+    });
+    return refs;
+}
+
+function escapeXml(str) {
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+// Export every literal in the project as a <literals> XML document so it can be
+// handed to a third-party translator. Content is emitted verbatim between the
+// <txt> tags (leading/trailing newlines preserved); empty/duplicate literals are skipped.
+function exportProjectText() {
+    const seen = new Set();
+    const literals = [];
+    collectTextLiteralRefs().forEach(ref => {
+        const value = ref.get();
+        if (!value || seen.has(value)) return;
+        seen.add(value);
+        literals.push(value);
+    });
+
+    if (literals.length === 0) {
+        showAppAlert('No text found in this project to export.', 'info');
+        return;
+    }
+
+    const body = literals.map(v => `    <txt>${escapeXml(v)}</txt>`).join('\n');
+    const xml = `<literals>\n${body}\n</literals>\n`;
+
+    const project = projects.find(p => p.id === currentProjectId);
+    const baseName = (project?.name || 'project').replace(/[^a-z0-9\-_]+/gi, '-');
+    const blob = new Blob([xml], { type: 'application/xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${baseName}-text.xml`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+// Import a translated <literals> XML file. For each tag that has both an original
+// and a translated="true" version, replace the original content wherever it
+// appears in the project (headlines, subheadlines, text blocks).
+async function importProjectText(file) {
+    let text;
+    try {
+        text = await file.text();
+    } catch (e) {
+        await showAppAlert('Could not read the selected file.', 'error');
+        return;
+    }
+
+    const doc = new DOMParser().parseFromString(text, 'application/xml');
+    if (doc.querySelector('parsererror')) {
+        await showAppAlert('The selected file is not valid XML.', 'error');
+        return;
+    }
+
+    const root = doc.querySelector('literals') || doc.documentElement;
+    if (!root) {
+        await showAppAlert('No <literals> element found in the file.', 'error');
+        return;
+    }
+
+    // Pair each tag's original content with its translated="true" sibling.
+    const originals = new Map();    // tag -> original content
+    const translations = new Map(); // tag -> translated content
+    Array.from(root.children).forEach(node => {
+        const tag = node.tagName;
+        if (node.getAttribute('translated') === 'true') {
+            translations.set(tag, node.textContent);
+        } else if (!originals.has(tag)) {
+            originals.set(tag, node.textContent);
+        }
+    });
+
+    const replacements = new Map(); // original content -> translated content
+    originals.forEach((orig, tag) => {
+        if (translations.has(tag)) replacements.set(orig, translations.get(tag));
+    });
+
+    if (replacements.size === 0) {
+        await showAppAlert('No translated literals found. Each entry needs an original and a matching translated="true" version.', 'info');
+        return;
+    }
+
+    let count = 0;
+    collectTextLiteralRefs().forEach(ref => {
+        const value = ref.get();
+        if (replacements.has(value)) {
+            ref.set(replacements.get(value));
+            count++;
+        }
+    });
+
+    if (count === 0) {
+        await showAppAlert('No matching text was found in this project to replace.', 'info');
+        return;
+    }
+
+    syncUIWithState();
+    updateElementsList();
+    updateCanvas();
+    await saveState();
+    await showAppAlert(`Replaced ${count} text ${count === 1 ? 'literal' : 'literals'} from the imported file.`, 'success');
+}
+
 function showAppAlert(message, type = 'info') {
     return new Promise((resolve) => {
         const iconBg = type === 'error' ? 'rgba(255, 69, 58, 0.2)' :
